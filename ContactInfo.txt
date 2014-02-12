@@ -1,0 +1,11 @@
+If you have questions about this library or want to inquire about
+the potential for using a Proximity Forest in your project / product,
+you may contact the author by e-mail.
+
+Stephen O'Hara
+svohara@gmail.com
+
+Please see the following page for more information.
+https://sites.google.com/site/svohara/proximity-forest
+
+
