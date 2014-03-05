@@ -12,11 +12,10 @@ import cPickle
 import random
 import math
 from collections import Counter
+from time import sleep
 
-from multiprocessing import Process, Manager, Queue, Pool
+from multiprocessing import Process, Manager, Queue
 from multiprocessing.managers import BaseManager
-from functools import partial
-
     
 class ZeroMedianDistanceError(ValueError):
     pass
@@ -146,6 +145,9 @@ class ProximityTree(object):
             s = "%s. State=Splitting.\n{%s}\n{%s}"%(self.ID, self.Children[0], self.Children[1])            
         return s
     
+    def getID(self):
+        return self.ID
+    
     def _wrap_item(self, x, key=None, label=None):
         """
         Wraps the value x and adds the resulting item to the items dictionary.
@@ -236,7 +238,7 @@ class ProximityTree(object):
         item_key = self._wrap_item(T, label=label)
         self._add(item_key)
         
-    def _addList(self, item_keys, report_frac=0.01):
+    def _addList(self, item_keys, report_frac=0.01, progress_dict=None):
         """
         Internal method for adding a batch of samples to the
         tree, where the samples are already in the items_dict,
@@ -245,17 +247,14 @@ class ProximityTree(object):
         rpt_pct = int( len(item_keys) * report_frac ) #how many samples is the fraction of the data set
         if rpt_pct < 1: rpt_pct = 1
         
-        #print "Adding input data to tree: %s"%self.ID
-        #print "DEBUG: Len(item_keys) = %d"%len(item_keys)
-        #print "DEBUG: Len(self.items_dict) = %d"%len(self.items_dict)
-        #counter = 1
+        counter = 1
         for key in item_keys:
-            #if counter%rpt_pct==0: print counter,
-            #if counter%(rpt_pct*10)==0: print
-            #sys.stdout.flush()
-            #counter += 1    
+            if progress_dict:
+                if counter%(rpt_pct*10)==0: 
+                    progress_dict[self.ID] = counter
+            counter += 1    
             self._add(key)
-        print "\n%d samples added to tree %s."%(len(item_keys), self.ID)
+        
         
     def addList(self, samples, labels, report_frac=0.01):
         '''
@@ -560,7 +559,38 @@ class ProximityTree(object):
 
 class PT_Manager(BaseManager):
     pass
-PT_Manager.register('ProxTree', ProximityTree, exposed=['_add','_addList','getLeafSizes','getKNearest','save','visit'])
+PT_Manager.register('ProxTree', ProximityTree, exposed=['getID','_add','_addList','getLeafSizes','getKNearest','save','visit'])
+    
+def _print_progress(progress_dict):
+    """
+    Internal func used to print forest indexing progress
+    to the standard console. This method works for the parallel
+    implementation where trees are build in separate sub-procs
+    """
+    M = float(progress_dict['Max'])
+    tree_ids = progress_dict.keys()
+    tree_ids.remove('Max')
+    tree_ids = sorted(tree_ids)
+    
+    while True:
+        #clear screen
+        _ = os.system('cls' if os.name == 'nt' else 'clear')
+        done_trees = 0
+        print "====================="
+        print "Forest Build Progress"
+        print "====================="
+        for tid in tree_ids:
+            try:
+                cur = progress_dict[tid]
+            except KeyError:
+                cur = 0
+            if cur == int(M): done_trees +=1
+            print "%s: %3.1f%%"%(tid, (cur/M)*100 )
+        print "====================="
+        
+        if done_trees == len(tree_ids): break
+        sleep(1) #TODO replace sleep with waiting on a signal, wake when a builder process signals
+
     
 class ProximityForest(object):
     '''
@@ -582,8 +612,9 @@ class ProximityForest(object):
         self.tree_kwargs = kwargs
         self.item_wrapper = item_wrapper
         
-        self.item_manager = Manager() #shared state manager for the items dict
-        self.items_dict = self.item_manager.dict()
+        self.manager = Manager() #shared state manager for the items dict and progress indicator
+        self.items_dict = self.manager.dict()
+        self.progress_dict = self.manager.dict()
         
         self.tree_manager = PT_Manager()  #shared state manager for the individual trees
         self.tree_manager.start()
@@ -723,10 +754,17 @@ class ProximityForest(object):
         #    log.write("Adding %d samples to forest.\n"%len(samples))
         #    log.write("============================\n")
         
+        self.progress_dict.clear()
+        self.progress_dict['Max'] = len(samples)
+        for t in self.trees: self.progress_dict[t.getID()]=0
+        
         print "Adding input data to forest..."
-        procList = [ Process(target=t._addList, args=(key_list,report_frac)) for t in self.trees]
+        procList = [ Process(target=t._addList, args=(key_list,report_frac,self.progress_dict)) for t in self.trees]
+        progressProc = Process(target=_print_progress, args=(self.progress_dict,))
+        progressProc.start()
         for proc in procList: proc.start()  #start them all
         for proc in procList: proc.join()   #wait for them all
+        progressProc.join()
         
         print "\n%d samples added to forest."%len(samples)
         #if not build_log is None: log.close()
