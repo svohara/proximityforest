@@ -648,7 +648,7 @@ class ProximityForest(object):
             tree.save(d, tn)
             
         finfo = {}
-        finfo['treeClass']=self.treeClass
+        #finfo['treeClass']=self.treeClass
         finfo['N']=self.N
         finfo['tree_kwargs']=self.tree_kwargs
         
@@ -742,7 +742,21 @@ class ProximityForest(object):
         Q.put(res)
         return
         
-    def getKNearestFromEachTree(self, T, K):
+    def getKNearestFromEachTree_serial(self, T, K):
+        '''
+        @return: A list of lists, representing the k-nearest-neighbors found
+        in each tree of this forest. The length of the outer list is the size
+        of the forest (# trees), and the length of the inner lists is K.
+        @note: Note that there is likely to be duplicate entries, as many trees will agree
+        that a give sample is a k-neighbor of the probe.
+        '''
+        res = [ t.getKNearest(T,K) for t in self.trees]
+        KNN_List = []
+        for knn in res:
+            for item in knn: KNN_List.append(item)
+        return KNN_List
+        
+    def getKNearestFromEachTree_parallel(self, T, K):
         '''
         @return: A list of lists, representing the k-nearest-neighbors found
         in each tree of this forest. The length of the outer list is the size
@@ -763,11 +777,16 @@ class ProximityForest(object):
             for item in KNN: KNN_List.append(item)
         return KNN_List
     
-    def getKNearest(self, T, K):
+    def getKNearest(self, T, K, parallel=False):
         '''
         Returns the K-nearest-neighbors in the forest.
         '''
-        KNN_List = self.getKNearestFromEachTree(T, K)
+        if parallel:
+            #sometimes this is bad if the multiprocess start/join overhead
+            # outweights the speedup.
+            KNN_List = self.getKNearestFromEachTree_parallel(T, K)
+        else:
+            KNN_List = self.getKNearestFromEachTree_serial(T, K)
         KNNs = list(set(KNN_List))  #remove duplicates b/c many trees will return the same answer as closest, etc.
                 
         return sorted(KNNs)[0:K] #like this, if K=3: [ (d1,k1), (d2,k2), (d3,k3)]  
