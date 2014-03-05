@@ -13,6 +13,11 @@ import random
 import math
 from collections import Counter
 
+from multiprocessing import Process, Manager, Queue, Pool
+from multiprocessing.managers import BaseManager
+from functools import partial
+
+    
 class ZeroMedianDistanceError(ValueError):
     pass
 
@@ -67,7 +72,7 @@ class PF_Item(object):
         return self.id == other.id
     
     def __repr__(self):
-        if self.label:
+        if not (self.label is None):
             return "%s (%s): %s"%(str(self.id), str(self.label), repr(self.val))
         else:
             return "%s: %s"%(str(self.id), repr(self.val))
@@ -231,6 +236,26 @@ class ProximityTree(object):
         item_key = self._wrap_item(T, label=label)
         self._add(item_key)
         
+    def _addList(self, item_keys, report_frac=0.01):
+        """
+        Internal method for adding a batch of samples to the
+        tree, where the samples are already in the items_dict,
+        and the input order has already been shuffled.
+        """
+        rpt_pct = int( len(item_keys) * report_frac ) #how many samples is the fraction of the data set
+        if rpt_pct < 1: rpt_pct = 1
+        
+        #print "Adding input data to tree: %s"%self.ID
+        #print "DEBUG: Len(item_keys) = %d"%len(item_keys)
+        #print "DEBUG: Len(self.items_dict) = %d"%len(self.items_dict)
+        #counter = 1
+        for key in item_keys:
+            #if counter%rpt_pct==0: print counter,
+            #if counter%(rpt_pct*10)==0: print
+            #sys.stdout.flush()
+            #counter += 1    
+            self._add(key)
+        print "\n%d samples added to tree %s."%(len(item_keys), self.ID)
         
     def addList(self, samples, labels, report_frac=0.01):
         '''
@@ -532,7 +557,11 @@ class ProximityTree(object):
         else:
             return sorted_neighbors[0:K]
 
-        
+
+class PT_Manager(BaseManager):
+    pass
+PT_Manager.register('ProxTree', ProximityTree, exposed=['_add','_addList','getLeafSizes','getKNearest','save','visit'])
+    
 class ProximityForest(object):
     '''
     A collection of proximity trees used for ANN queries. A forest can have any
@@ -551,16 +580,23 @@ class ProximityForest(object):
         @param kwargs: The keyword arguments required by treeClass to create the component trees.
         '''
         self.tree_kwargs = kwargs
-        self.items_dict = {}
         self.item_wrapper = item_wrapper
+        
+        self.item_manager = Manager() #shared state manager for the items dict
+        self.items_dict = self.item_manager.dict()
+        
+        self.tree_manager = PT_Manager()  #shared state manager for the individual trees
+        self.tree_manager.start()
         
         if trees is None:
             self.N = N
             self.trees = []
             pad = int(round(math.log10(N)))+1
             for i in range(N):
-                tmp = ProximityTree(tree_id="t%s.root"%str(i).zfill(pad), item_wrapper=item_wrapper,
+                tmp = self.tree_manager.ProxTree(tree_id="t%s.root"%str(i).zfill(pad), item_wrapper=item_wrapper,
                                      items_dict=self.items_dict, **self.tree_kwargs)
+                #tmp = ProximityTree(tree_id="t%s.root"%str(i).zfill(pad), item_wrapper=item_wrapper,
+                #                     items_dict=self.items_dict, **self.tree_kwargs)
                 self.trees.append(tmp)
         else:
             #construct forest from a set of existing proximity trees
@@ -649,9 +685,13 @@ class ProximityForest(object):
         """        
         item_key = len(self.items_dict) if key is None else key
         self.items_dict[item_key] = self.item_wrapper(item_key, T, label=label)
-        for tree in self.trees: tree._add(item_key)
         
-    def addList(self, samples, labels, keys=None, report_frac = 0.01, build_log = None):
+        procList = [ Process(target=t._add, args=(item_key,)) for t in self.trees]
+        for proc in procList: proc.start()
+        for proc in procList: proc.join()
+        
+        
+    def addList(self, samples, labels, keys=None, report_frac = 0.01): #, build_log = None):
         '''
         Adds a list of samples to the proximity tree
         @param samples: a list of samples
@@ -673,38 +713,35 @@ class ProximityForest(object):
             self.items_dict[k] = self.item_wrapper(k,s,label=lb)
         
         print "Randomizing order of input data..."
-        idxs = scipy.random.permutation( len(self.items_dict) ) #shuffle order that we add samples to tree
+        key_list = scipy.random.permutation( self.items_dict.keys() ) #shuffle order of keys before adding
         
-        rpt_pct = int( len(samples) * report_frac ) #how many samples is the fraction of the data set
-        if rpt_pct < 1: rpt_pct = 1
-        
-        if not build_log is None:
-            print "A log file of the build process will be written to: %s."%build_log
-            log = open(build_log,"w")
-            log.write("============================\n")
-            log.write("Proximity Forest Build Log\n")
-            log.write("Adding %d samples to forest.\n"%len(samples))
-            log.write("============================\n")
+        #if not build_log is None:
+        #    print "A log file of the build process will be written to: %s."%build_log
+        #    log = open(build_log,"w")
+        #    log.write("============================\n")
+        #    log.write("Proximity Forest Build Log\n")
+        #    log.write("Adding %d samples to forest.\n"%len(samples))
+        #    log.write("============================\n")
         
         print "Adding input data to forest..."
-        key_list = self.items_dict.keys()
-        counter = 1
-        for i in idxs:  #idxs is the shuffled list of indexes
-            if counter%rpt_pct==0:
-                print counter,
-                sys.stdout.flush()
-                if not build_log is None:
-                    log.write( str(counter)+"\t")
-                    log.flush()
-            if counter%(rpt_pct*10)==0:
-                print
-                if not build_log is None: log.write( "\n" )            
-            counter += 1
-            k = key_list[i]
-            for tree in self.trees: tree._add(k)
+        procList = [ Process(target=t._addList, args=(key_list,report_frac)) for t in self.trees]
+        for proc in procList: proc.start()  #start them all
+        for proc in procList: proc.join()   #wait for them all
+        
         print "\n%d samples added to forest."%len(samples)
-        if not build_log is None: log.close()
+        #if not build_log is None: log.close()
      
+    def _getKNN(self, tree, T, K, Q):
+        """
+        Internal method to allow for multiprocessing of queries to the forest
+        @param tree: The tree to evaluate
+        @param T: The input sample
+        @param K: The number of neighbors
+        """
+        res = tree.getKNearest(T,K)
+        Q.put(res)
+        return
+        
     def getKNearestFromEachTree(self, T, K):
         '''
         @return: A list of lists, representing the k-nearest-neighbors found
@@ -714,8 +751,15 @@ class ProximityForest(object):
         that a give sample is a k-neighbor of the probe.
         '''
         KNN_List = [] #there will be a KNN list for each tree in forest...
-        for i in range(self.N):
-            KNN = self.trees[i].getKNearest(T,K)
+        qList = [ Queue() for _ in self.trees ]
+        procList = [Process(target=self._getKNN, args=(self[idx],T,K,qList[idx])) for idx in range(self.N)]
+        
+        for proc in procList: proc.start()
+        for proc in procList: proc.join()
+        
+        res = [ Q.get() for Q in qList]  #the KNN for each tree in forest
+        
+        for KNN in res:
             for item in KNN: KNN_List.append(item)
         return KNN_List
     
