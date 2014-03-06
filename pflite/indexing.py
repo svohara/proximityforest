@@ -561,7 +561,7 @@ class PT_Manager(BaseManager):
     pass
 PT_Manager.register('ProxTree', ProximityTree, exposed=['getID','_add','_addList','getLeafSizes','getKNearest','save','visit'])
     
-def _print_progress(progress_dict):
+def _print_progress(progress_dict, interval_sec=10):
     """
     Internal func used to print forest indexing progress
     to the standard console. This method works for the parallel
@@ -572,24 +572,29 @@ def _print_progress(progress_dict):
     tree_ids.remove('Max')
     tree_ids = sorted(tree_ids)
     
+    horz_line = "=" * 40
+    header_str = horz_line+"\nForest Build Progress\n" + horz_line + "\n"
+    
     while True:
         #clear screen
-        _ = os.system('cls' if os.name == 'nt' else 'clear')
+        #_ = os.system('cls' if os.name == 'nt' else 'clear')
         done_trees = 0
-        print "====================="
-        print "Forest Build Progress"
-        print "====================="
+        
+        outstr = header_str
         for tid in tree_ids:
             try:
                 cur = progress_dict[tid]
             except KeyError:
                 cur = 0
             if cur == int(M): done_trees +=1
-            print "%s: %3.1f%%"%(tid, (cur/M)*100 )
-        print "====================="
+            outstr += "%s: %3.1f%%\n"%(tid, (cur/M)*100 )
+        
+        outstr += "%s\n"%horz_line
+        sys.stdout.write(outstr)
+        sys.stdout.flush()
         
         if done_trees == len(tree_ids): break
-        sleep(1) #TODO replace sleep with waiting on a signal, wake when a builder process signals
+        sleep(interval_sec) #TODO replace sleep with waiting on a signal, wake when a builder process signals
 
     
 class ProximityForest(object):
@@ -722,7 +727,7 @@ class ProximityForest(object):
         for proc in procList: proc.join()
         
         
-    def addList(self, samples, labels, keys=None, report_frac = 0.01): #, build_log = None):
+    def addList(self, samples, labels, keys=None, report_frac = 0.01, refresh_progress=10):
         '''
         Adds a list of samples to the proximity tree
         @param samples: a list of samples
@@ -733,9 +738,9 @@ class ProximityForest(object):
         keys will be used.
         @param report_frac: How often do you want feedback during the tree construction
         process, in terms of progress. The default 0.01 means that there will be
-        progress information printed after every 1% of the data has been added.
-        @param build_log: Specify a full path+file and the build progress will be logged
-        to this file. Specify None (default) to not log the build progress.
+        progress information updated after every 1% of the data has been added.
+        @param refresh_progress: How many seconds should elapse before the progress
+        screen is redrawn with updated info?
         '''
         
         print "Adding samples to the forest's items dictionary..."
@@ -746,28 +751,19 @@ class ProximityForest(object):
         print "Randomizing order of input data..."
         key_list = scipy.random.permutation( self.items_dict.keys() ) #shuffle order of keys before adding
         
-        #if not build_log is None:
-        #    print "A log file of the build process will be written to: %s."%build_log
-        #    log = open(build_log,"w")
-        #    log.write("============================\n")
-        #    log.write("Proximity Forest Build Log\n")
-        #    log.write("Adding %d samples to forest.\n"%len(samples))
-        #    log.write("============================\n")
-        
         self.progress_dict.clear()
         self.progress_dict['Max'] = len(samples)
         for t in self.trees: self.progress_dict[t.getID()]=0
         
         print "Adding input data to forest..."
         procList = [ Process(target=t._addList, args=(key_list,report_frac,self.progress_dict)) for t in self.trees]
-        progressProc = Process(target=_print_progress, args=(self.progress_dict,))
+        progressProc = Process(target=_print_progress, args=(self.progress_dict,10))
         progressProc.start()
         for proc in procList: proc.start()  #start them all
         for proc in procList: proc.join()   #wait for them all
         progressProc.join()
         
         print "\n%d samples added to forest."%len(samples)
-        #if not build_log is None: log.close()
      
     def _getKNN(self, tree, T, K, Q):
         """
