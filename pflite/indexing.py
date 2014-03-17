@@ -58,7 +58,11 @@ class PF_Item(object):
         You can subclass this object and override this method
         to provide for different distance functions.
         """
-        return abs( other.val - self.val )
+        x = abs( other.val - self.val )
+        if type(x) == scipy.ndarray:
+            return sum(x)  #produce a scalar result from vector diff
+        else:     
+            return x
     
     def __hash__(self):
         return hash(self.id)
