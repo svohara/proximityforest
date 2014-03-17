@@ -559,7 +559,7 @@ class ProximityTree(object):
 
 class PT_Manager(BaseManager):
     pass
-PT_Manager.register('ProxTree', ProximityTree, exposed=['getID','_add','_addList','getLeafSizes','getKNearest','save','visit'])
+PT_Manager.register('ProxTree', ProximityTree, exposed=['getID','_add','_addList','getLeafSizes','getKNearest','save','__str__'])
     
 def _print_progress(progress_dict, interval_sec=10):
     """
