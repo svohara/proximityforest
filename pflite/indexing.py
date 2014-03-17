@@ -5,6 +5,8 @@ Created on Mar 3, 2014
 Proximity Forest Indexing
 """
 import scipy
+import scipy.spatial.distance as spd
+
 import sys
 import os
 import cPickle
@@ -85,11 +87,12 @@ class PF_Item(object):
         Comparison via unique id, helps with things like sorting
         """
         return cmp(self.id, other.id)
+ 
 
 class ProximityTree(object):
-    '''
+    """
     Base class for a tree which sorts elements based on a pair-wise distance function.
-    '''
+    """
     zero_median_warning_given = False
     
     def __init__(self, tree_id="root", item_wrapper=PF_Item, depth=0, parent=None, root=None,
@@ -564,6 +567,227 @@ class ProximityTree(object):
 class PT_Manager(BaseManager):
     pass
 PT_Manager.register('ProxTree', ProximityTree, exposed=['getID','_add','_addList','getLeafSizes','getKNearest','save','__str__'])
+   
+class ProximityTreeMatrix(ProximityTree):
+    """
+    Version of the proximity tree for use when input is a matrix,
+    which is the common use case, but not the most general.
+    """
+    def __init__(self, tree_id="root", vector_distance='euclidean', depth=0, parent=None, root=None,
+                   Tau=15, maxdepth=50, **kwargs):
+        """
+        Constructor
+        @param tree_id: A string to identify this tree / subtree
+        @param vector_distance: A string specifying the distance measure to use between
+        the feature vectors in the matrix. Choices are as per scipy.spatial.distance.cdist(...)
+        function.
+        @param depth: The depth of this tree, the root node should be zero.
+        @param parent: If a subtree (non-root node), then the parent should point back to the
+        containing node.
+        @param root: If a subtree (non-root node), then the root argument should be a reference
+        back to the root node of the tree.
+        @param Tau: The splitting number. This node will collect samples in an item list until
+        this number is reached, at which point it splits into two subtrees and sends half of
+        the samples down each path.
+        @param maxdepth: The deepest allowable tree.
+        @note: Some subclasses of the Proximity Tree, such as an EntropySplitSubspaceTree, require
+        additional keyword arguments which must be passed onto the constructor of all subtrees when
+        splitting nodes. To allow the subclasses to avoid having to override the _split() method,
+        all kwargs will be passed onto all child subtrees.
+        """
+        ProximityTree.__init__(self, tree_id=tree_id, item_wrapper=None, depth=depth, parent=parent, root=root,
+                         items_dict=None, Tau=Tau, maxdepth=maxdepth, **kwargs)
+        self.vector_dist = vector_distance
+        self.data_matrix = None
+        
+    def __str__(self):
+        if self.State == "Collecting":
+            s = "%s. State=Collecting. NumItems=%d."%(self.ID, self.data_matrix.shape[0])
+        else:
+            s = "%s. State=Splitting.\n{%s}\n{%s}"%(self.ID, self.Children[0], self.Children[1])            
+        return s
+        
+    def clear(self):
+        """
+        clears out all data in tree
+        """
+        #TODO: do we want to clear the data_matrix at the root node?
+        ProximityTree.clear(self)
+        self.data_matrix = None
+        self.labels = None
+    
+    def _split(self):
+        """
+        We keep collecting samples (items) until we reach Tau, at which point we
+        split this node into a left tree and right tree using a median point in the
+        samples, as compared to a distance from a pivot matrix.
+        """
+        (_N,p) = self.data_matrix.shape  #N=number of samples, p=dimensionality of each
+        
+        #pivot is randomly selected in the following because data_matrix for node
+        # was shuffled before building the index, so we can just take the first row as pivot.
+        pivot_vector = self.data_matrix[0,:].reshape(1,p)
+                
+        rest = self.data_matrix[1:,:]
+        rest_labels = self.labels[1:]
+        
+        self.Ds = spd.cdist(rest, pivot_vector, self.vector_dist).squeeze()
+        self.SplitD  = scipy.median(self.Ds) #splitting distance is the median
+        
+        #subset of all samples <= median dist from pivot
+        maskL = (self.Ds <= self.SplitD)
+        L = rest[ maskL, : ]
+        L_labels = rest_labels[ maskL ]
+        
+        #subset of all samples > median dist from pivot
+        maskR = (self.Ds > self.SplitD)
+        R = rest[ maskR, : ]
+        R_labels = rest_labels[ maskR ]
+                
+        #construct the left and right child trees
+        r = self._getRoot()
+        self.Children[0] = self.__class__(tree_id="%s0"%self.ID, vector_distance=self.vector_dist, depth=self.depth+1,
+                                       parent=self, root=r, Tau=self.Tau, maxdepth=self.maxdepth, **self.tree_kwargs)
+        self.Children[1] = self.__class__(tree_id="%s0"%self.ID, vector_distance=self.vector_dist, depth=self.depth+1,
+                                       parent=self, root=r, Tau=self.Tau, maxdepth=self.maxdepth, **self.tree_kwargs)
+
+        #recursively build the left and right subtrees
+        self.Children[0].build(L,L_labels)
+        self.Children[1].build(R,R_labels)
+        
+        
+    def _buildIndex(self):
+        """
+        Internal method for building the tree (index) from all the
+        data in matrix M.
+        """
+        if self.depth == self.maxdepth:
+            raise ValueError("Bad Tree %s, Max Depth (%d) Reached"%(self.ID, self.maxdepth))
+        
+        N = self.data_matrix.shape[0]
+        if N <= self.Tau:
+            self.State = "Collecting"
+            return        
+        
+        self.State = "Splitting"
+        self._split()
+        
+    def build(self, M, L):
+        """
+        Build the Proximity Tree using input matrix
+        and associated label vector.
+        """        
+        if type(L) == list:
+            L = scipy.array(L)
+        N = M.shape[0]  #number of samples
+        p = scipy.random.permutation(N)
+        self.data_matrix = M[p,:] #shuffled
+        self.labels = L[p] #shuffled in same order as data
+        self._buildIndex()
+        
+    def add(self, T, label=None):
+        """
+        Not applicable for feature matrix indexing,
+        use build(M,L) instead.
+        """
+        raise NotImplemented
+        
+    def addList(self, samples, labels, report_frac=0.01):
+        """
+        Not applicable for feature matrix indexing,
+        use build(M,L) instead.
+        """
+        raise NotImplemented
+    
+    def getLeafSizes(self):
+        """
+        @return: A list of tuples (ID, size) indicating the ID of the leaf node and its
+        corresponding size, in terms of the number of items stored in the node.
+        """
+        nodes = self.getLeafNodes()
+        sizes = []
+        for node in nodes:
+            sizes.append( (node.ID, node.data_matrix.shape[0]))
+        return sizes
+
+    def getNeighborhood(self, v):
+        """
+        @param v: The input vector to be sorted by the tree, but NOT added to it.
+        @return: The node tree object where v would be sorted. This is equivalent
+        to the node where the approximate nearest neighbors of v should be found.
+        """
+        p = self.data_matrix.shape[1]
+        ptr = self
+        while ptr != None:
+            if ptr.State == "Collecting":
+                #we reached a leaf node
+                break 
+            else:
+                pivot_vector = ptr.data_matrix[0,:]
+                thresh = ptr.SplitD
+                d = spd.cdist(v.reshape(1,p), pivot_vector.reshape(1,p), self.vector_dist)[0][0]
+                if d <= thresh:
+                    ptr = ptr.Children[0]
+                else:
+                    ptr = ptr.Children[1]
+                                
+        #at this point, we are at a leaf node
+        return ptr
+
+    def getNeighbors(self, v):
+        """
+        Use this method when you don't want to add vector v to the tree, but rather, you want
+        to return the items in the leaf node where v would sort...i.e. the neighborhood
+        based on the tree structure.
+        @return: ( Data, NodeID ) where Data is a tuple(D,L) where D is the data matrix
+        containing the neighbors and L is a vector of associated labels.
+        NodeID is the identifier for which leaf node forms the neighborhood.
+        """
+        node = self.getNeighborhood(v)
+        return ( (node.data_matrix, node.labels), node.ID)
+    
+    def getSortedNeighbors(self, v):
+        """ 
+        Return the node neighbors of v, sorted according to increasing distance
+        @param v: The input sample as a vector
+        @return: The neighbors of v, sorted according to distance. Formatted as:
+        (D,M,L) where D is a vector of sorted distances to the neighbors,
+        M is the sorted data matrix for the neighboring vectors,
+        and L is the vector of labels associated to the neighbors. 
+        """
+        p = self.data_matrix.shape[1]
+        ( (M,L), _node) = self.getNeighbors(v)
+        Dx = spd.cdist(M, v.reshape(1,p), self.vector_dist)
+        s = Dx.argsort(axis=0).squeeze()  #sort order indexes
+        
+        Ds = Dx[s]     #make a vector of sorted dists
+        Ms = M[s,:]    #M sorted according to Dx
+        Ls = L[s]      #L sorted according to Dx
+        
+        return (Ds,Ms,Ls)
+        
+    def getKNearest(self, v, K=3):
+        """
+        Get the K nearest neighbors to v from within the leaf node where
+        v is sorted. This function, which is O(N) in terms of the size of
+        the leaf node (between self.Tau/2 and self.Tau) is intended to be used
+        to refine the results of an approximate nearest neighbors search
+        using a subspace tree.
+        The "neighborhood" of samples that fall in the same tree node
+        will typically be a small number, and so we add only a constant time
+        additional computation to the retrieval time of the tree structure.
+        @param v: The input sample
+        @param K: The number of nearest neighbors to return
+        @return: A list of tuples (d,vn,l) of the nearest neighbors, where d is distance,
+            vn is the neighbor vector, and L is the label of the neighbor.
+        """
+        (Ds,Ms,Ls) = self.getSortedNeighbors(v)
+        if len(Ds) < K:
+            #print "getKNearest WARNING: neighborhood size is < K."
+            K = len(Ds)
+            
+        return [ (Ds[ix], Ms[ix,:], Ls[ix]) for ix in range(K) ]
+        
     
 def _print_progress(progress_dict, interval_sec=10):
     """
@@ -600,7 +824,21 @@ def _print_progress(progress_dict, interval_sec=10):
         if done_trees == len(tree_ids): break
         sleep(interval_sec) #TODO replace sleep with waiting on a signal, wake when a builder process signals
 
+def test_proximity_tree_matrix():
+    """
+    Ensure that we can build a proximity tree from matrix inputs
+    """
+    M = scipy.randn(10000,100) #10000 samples, 100 dims each
+    L = range(10000) #label is just the index
+    ptree = ProximityTreeMatrix()
+    print "Building proximity tree"
+    ptree.build(M, L)
     
+    v = scipy.randn(1,100)
+    rc = ptree.getKNearest(v, 3)
+    
+    return ptree, rc
+
 class ProximityForest(object):
     '''
     A collection of proximity trees used for ANN queries. A forest can have any
