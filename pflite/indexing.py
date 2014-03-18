@@ -96,7 +96,7 @@ class ProximityTree(object):
     zero_median_warning_given = False
     
     def __init__(self, tree_id="root", item_wrapper=PF_Item, depth=0, parent=None, root=None,
-                 items_dict=None, Tau=15, maxdepth=50, **kwargs):
+                 item_data=None, Tau=15, maxdepth=50, **kwargs):
         '''
         Constructor
         @param tree_id: A string to identify this tree / subtree
@@ -107,9 +107,9 @@ class ProximityTree(object):
         containing node.
         @param root: If a subtree (non-root node), then the root argument should be a reference
         back to the root node of the tree.
-        @param items_dict: If this tree will index items already collected into an item_dict,
+        @param item_data: If this tree will index items already collected into an item_dict,
         this can be specified here. If None, the root node of the tree will create the item_dict
-        used internally. Generally a ProximityForest will hold the items_dict, and the
+        used internally. Generally a ProximityForest will hold the item_data, and the
         individual trees will all reference the same structure.
         @param Tau: The splitting number. This node will collect samples in an item list until
         this number is reached, at which point it splits into two subtrees and sends half of
@@ -128,13 +128,12 @@ class ProximityTree(object):
         self.root = root
         
         self.item_wrapper = item_wrapper
-        if not items_dict is None:
-            self.items_dict = items_dict
+        if item_data is None:
+            #use same item data as root node, if this is a subtree and caller has
+            # not provided an explicit override.
+            self.item_data = root.item_data if not (self.root is None) else {}
         else:
-            if self.root is None:
-                self.items_dict = {}
-            else:
-                self.items_dict = root.items_dict  #all subtrees share the same items_dict
+            self.item_data = item_data
             
         self.Pivot = None 
         self.SplitD = None
@@ -164,16 +163,16 @@ class ProximityTree(object):
         the user-supplied key is used, and a check is made to ensure that this
         key has not already been used in the dict.
         @return: The key to the wrapped item, which can be retrieved using
-        the self.items_dict[key]. Key is hashable and unique.
+        the self.item_data[key]. Key is hashable and unique.
         """
         if not key:
-            key = len(self.items_dict) #TODO replace with safer mechanism
+            key = len(self.item_data) #TODO replace with safer mechanism
         
-        if key in self.items_dict:
+        if key in self.item_data:
             raise DuplicateKey
         
         item = self.item_wrapper(key,x,label=label)
-        self.items_dict[key] = item
+        self.item_data[key] = item
             
         return key
     
@@ -183,8 +182,8 @@ class ProximityTree(object):
         both of which are referenced by their keys in 
         the item dict
         """
-        T1 = self.items_dict[key1]
-        T2 = self.items_dict[key2]
+        T1 = self.item_data[key1]
+        T2 = self.item_data[key2]
         return T1.dist(T2)
         
     def _dist2(self, item, key):
@@ -193,14 +192,14 @@ class ProximityTree(object):
         item, not in the item_dict, and another which
         is in the dict and referenced by key.
         """
-        T = self.items_dict[key]
+        T = self.item_data[key]
         return item.dist(T)
         
     def clear(self):
         """
         clears out all data in tree
         """
-        #TODO: do we want to clear the items_dict too? at the root node?
+        #TODO: do we want to clear the item_data too? at the root node?
         self.items = []
         self.State = "Collecting"
         self.Children = [None,None]
@@ -248,7 +247,7 @@ class ProximityTree(object):
     def _addList(self, item_keys, report_frac=0.01, progress_dict=None):
         """
         Internal method for adding a batch of samples to the
-        tree, where the samples are already in the items_dict,
+        tree, where the samples are already in the item_data,
         and the input order has already been shuffled.
         """
         rpt_pct = int( len(item_keys) * report_frac ) #how many samples is the fraction of the data set
@@ -301,12 +300,12 @@ class ProximityTree(object):
         be assigned to, based on median of distance to pivot.
         """
         if isinstance(item, self.item_wrapper):
-            #this is an item not in the items_dict, which is used when
+            #this is an item not in the item_data, which is used when
             # we are sorting a sample that is not part of the index to
             # find its nearest neighbors
             D = self._dist2(item, self.Pivot)
         else:
-            #item is a key into the items_dict, so we can use the convenience function
+            #item is a key into the item_data, so we can use the convenience function
             D = self._dist1(item, self.Pivot)
         
         if D <= self.SplitD:
@@ -488,7 +487,7 @@ class ProximityTree(object):
         to the node where the approximate nearest neighbors of T should be found.
         """
         #this item isn't being added to tree, so by assigning None as the key,
-        # we assure it won't ever have the same id as samples in the items_dict
+        # we assure it won't ever have the same id as samples in the item_data
         input_item = self.item_wrapper(None,T)  
 
         ptr = self
@@ -519,7 +518,7 @@ class ProximityTree(object):
         to return the items in the leaf node where T would sort...i.e. the neighborhood
         based on the tree structure.
         @return: ( NeighborList, NodeID ) where NeighborList is a list of tuples (key,L) where
-        key is the key of the sample in the items_dict, L is the sample label.
+        key is the key of the sample in the item_data, L is the sample label.
         NodeID is the identifier for which leaf node forms the neighborhood.
         """
         node = self.getNeighborhood(T)
@@ -528,10 +527,10 @@ class ProximityTree(object):
     def getSortedNeighbors(self, T):
         """ 
         Return the node neighbors of T, sorted according to increasing distance, as
-        a list of tuples (key,L) where key is the key of the sample in items_dict, L is the label.
+        a list of tuples (D,key) where key is the key of the sample in item_data, D is the distance.
         @param T: The input sample
         @return: The neighbors of T, sorted according to distance, as a list
-        of tuples (D,key,L), where key is the sample key in items_dict, L is its label, and D is its distance to T
+        of tuples (D,key), where key is the sample key in item_data, and D is its distance to T
         """
         #self._dist2(item, key)
         
@@ -553,8 +552,8 @@ class ProximityTree(object):
         additional computation to the retrieval time of the tree structure.
         @param T: The input sample
         @param K: The number of nearest neighbors to return
-        @return: A list of tuples (d,k,L) of the nearest neighbors, where d is distance, k is
-        the neighbor key in items_dict, and L is the label of the neighbor.
+        @return: A list of tuples (d,k) of the nearest neighbors, where d is distance, k is
+        the neighbor key in item_data.
         """
         sorted_neighbors = self.getSortedNeighbors(T)
         if len(sorted_neighbors) < K:
@@ -596,53 +595,42 @@ class ProximityTreeMatrix(ProximityTree):
         all kwargs will be passed onto all child subtrees.
         """
         ProximityTree.__init__(self, tree_id=tree_id, item_wrapper=None, depth=depth, parent=parent, root=root,
-                         items_dict=None, Tau=Tau, maxdepth=maxdepth, **kwargs)
+                         item_data=None, Tau=Tau, maxdepth=maxdepth, **kwargs)
         self.vector_dist = vector_distance
-        self.data_matrix = None
-        
-    def __str__(self):
-        if self.State == "Collecting":
-            s = "%s. State=Collecting. NumItems=%d."%(self.ID, self.data_matrix.shape[0])
-        else:
-            s = "%s. State=Splitting.\n{%s}\n{%s}"%(self.ID, self.Children[0], self.Children[1])            
-        return s
-        
-    def clear(self):
-        """
-        clears out all data in tree
-        """
-        #TODO: do we want to clear the data_matrix at the root node?
-        ProximityTree.clear(self)
-        self.data_matrix = None
-        self.labels = None
+        #self.item_data will be dict{matrix=M, labels=L} where M is data matrix, L is label vector
+        #self.items will be a list of indexes into item_data[matrix] to represent the vectors in this node
+    
+    def _matrix(self):
+        return self.item_data['matrix'] if self.item_data else None
+    
+    def _labels(self):
+        return self.item_data['labels'] if self.item_data else None
     
     def _split(self):
         """
         We keep collecting samples (items) until we reach Tau, at which point we
         split this node into a left tree and right tree using a median point in the
-        samples, as compared to a distance from a pivot matrix.
+        samples, as compared to a distance from a pivot.
         """
-        (_N,p) = self.data_matrix.shape  #N=number of samples, p=dimensionality of each
+        item_data = self._matrix()
         
-        #pivot is randomly selected in the following because data_matrix for node
-        # was shuffled before building the index, so we can just take the first row as pivot.
-        pivot_vector = self.data_matrix[0,:].reshape(1,p)
-                
-        rest = self.data_matrix[1:,:]
-        rest_labels = self.labels[1:]
+        #randomly pick pivot from the list of indexes in self.items
+        self.Pivot = scipy.random.choice( self.items ) #index of the selected pivot node  
+        pivot_vector = item_data[ self.Pivot, :].reshape(1, item_data.shape[1])
         
-        self.Ds = spd.cdist(rest, pivot_vector, self.vector_dist).squeeze()
-        self.SplitD  = scipy.median(self.Ds) #splitting distance is the median
+        #slice item_data to create the data matrix of the items in this node
+        M = item_data[self.items, :]
+        
+        self.Ds = spd.cdist(M, pivot_vector, self.vector_dist).squeeze()
+        self.SplitD  = scipy.median(self.Ds) #splitting distance is the median dist to pivot vector
         
         #subset of all samples <= median dist from pivot
-        maskL = (self.Ds <= self.SplitD)
-        L = rest[ maskL, : ]
-        L_labels = rest_labels[ maskL ]
+        maskL = scipy.nonzero(self.Ds <= self.SplitD)[0]
+        left_items = [ self.items[x] for x in maskL ]
         
         #subset of all samples > median dist from pivot
-        maskR = (self.Ds > self.SplitD)
-        R = rest[ maskR, : ]
-        R_labels = rest_labels[ maskR ]
+        maskR = scipy.nonzero(self.Ds > self.SplitD)[0]
+        right_items = [ self.items[x] for x in maskR ]
                 
         #construct the left and right child trees
         r = self._getRoot()
@@ -652,8 +640,10 @@ class ProximityTreeMatrix(ProximityTree):
                                        parent=self, root=r, Tau=self.Tau, maxdepth=self.maxdepth, **self.tree_kwargs)
 
         #recursively build the left and right subtrees
-        self.Children[0].build(L,L_labels)
-        self.Children[1].build(R,R_labels)
+        self.Children[0].items = left_items
+        self.Children[0]._buildIndex()
+        self.Children[1].items = right_items
+        self.Children[1]._buildIndex()
         
         
     def _buildIndex(self):
@@ -664,25 +654,24 @@ class ProximityTreeMatrix(ProximityTree):
         if self.depth == self.maxdepth:
             raise ValueError("Bad Tree %s, Max Depth (%d) Reached"%(self.ID, self.maxdepth))
         
-        N = self.data_matrix.shape[0]
+        N = len(self.items)
+        
         if N <= self.Tau:
             self.State = "Collecting"
-            return        
-        
-        self.State = "Splitting"
-        self._split()
+        else:
+            self.State = "Splitting"
+            self._split()
+        return
         
     def build(self, M, L):
         """
         Build the Proximity Tree using input matrix
         and associated label vector.
-        """        
+        """
         if type(L) == list:
             L = scipy.array(L)
-        N = M.shape[0]  #number of samples
-        p = scipy.random.permutation(N)
-        self.data_matrix = M[p,:] #shuffled
-        self.labels = L[p] #shuffled in same order as data
+        self.item_data = {"matrix":M, "labels":L}
+        self.items = range(len(L))  #at this point all indexes are in this node
         self._buildIndex()
         
     def add(self, T, label=None):
@@ -698,17 +687,7 @@ class ProximityTreeMatrix(ProximityTree):
         use build(M,L) instead.
         """
         raise NotImplemented
-    
-    def getLeafSizes(self):
-        """
-        @return: A list of tuples (ID, size) indicating the ID of the leaf node and its
-        corresponding size, in terms of the number of items stored in the node.
-        """
-        nodes = self.getLeafNodes()
-        sizes = []
-        for node in nodes:
-            sizes.append( (node.ID, node.data_matrix.shape[0]))
-        return sizes
+
 
     def getNeighborhood(self, v):
         """
@@ -716,16 +695,19 @@ class ProximityTreeMatrix(ProximityTree):
         @return: The node tree object where v would be sorted. This is equivalent
         to the node where the approximate nearest neighbors of v should be found.
         """
-        p = self.data_matrix.shape[1]
+        item_data = self._matrix()
+        p = item_data.shape[1]
+        vec = v.reshape(1,p)
+        
         ptr = self
         while ptr != None:
             if ptr.State == "Collecting":
                 #we reached a leaf node
                 break 
             else:
-                pivot_vector = ptr.data_matrix[0,:]
+                pivot_vector = item_data[ ptr.Pivot, :].reshape(1,p)
                 thresh = ptr.SplitD
-                d = spd.cdist(v.reshape(1,p), pivot_vector.reshape(1,p), self.vector_dist)[0][0]
+                d = spd.cdist(vec, pivot_vector, self.vector_dist)[0][0]
                 if d <= thresh:
                     ptr = ptr.Children[0]
                 else:
@@ -733,60 +715,29 @@ class ProximityTreeMatrix(ProximityTree):
                                 
         #at this point, we are at a leaf node
         return ptr
-
-    def getNeighbors(self, v):
-        """
-        Use this method when you don't want to add vector v to the tree, but rather, you want
-        to return the items in the leaf node where v would sort...i.e. the neighborhood
-        based on the tree structure.
-        @return: ( Data, NodeID ) where Data is a tuple(D,L) where D is the data matrix
-        containing the neighbors and L is a vector of associated labels.
-        NodeID is the identifier for which leaf node forms the neighborhood.
-        """
-        node = self.getNeighborhood(v)
-        return ( (node.data_matrix, node.labels), node.ID)
     
     def getSortedNeighbors(self, v):
         """ 
-        Return the node neighbors of v, sorted according to increasing distance
-        @param v: The input sample as a vector
-        @return: The neighbors of v, sorted according to distance. Formatted as:
-        (D,M,L) where D is a vector of sorted distances to the neighbors,
-        M is the sorted data matrix for the neighboring vectors,
-        and L is the vector of labels associated to the neighbors. 
+        Return the node neighbors of v, sorted according to increasing distance, as
+        a list of tuples (idx,L) where idx is the row of the sample in item_data, L is the label.
+        @param v: The input sample (vector)
+        @return: The neighbors of v, sorted according to distance, as a list
+        of tuples (D,idx,L), where idx is the sample row in item_data, L is its label, and D is its distance to T
         """
-        p = self.data_matrix.shape[1]
-        ( (M,L), _node) = self.getNeighbors(v)
-        Dx = spd.cdist(M, v.reshape(1,p), self.vector_dist)
-        s = Dx.argsort(axis=0).squeeze()  #sort order indexes
+        item_data = self._matrix()
+        p = item_data.shape[1]
+        (idxs, _node) = self.getNeighbors(v)
+        M = item_data[ idxs, :]
         
-        Ds = Dx[s]     #make a vector of sorted dists
-        Ms = M[s,:]    #M sorted according to Dx
-        Ls = L[s]      #L sorted according to Dx
+        Dx = spd.cdist(M, v.reshape(1,p), self.vector_dist).squeeze()
+        s = Dx.argsort(axis=0) #.squeeze()  #sort order indexes
         
-        return (Ds,Ms,Ls)
+        Ds = Dx[s]                #make a vector of sorted dists
+        Is = scipy.array(idxs)[s]    #neighbor idxs sorted according to Dx
         
-    def getKNearest(self, v, K=3):
-        """
-        Get the K nearest neighbors to v from within the leaf node where
-        v is sorted. This function, which is O(N) in terms of the size of
-        the leaf node (between self.Tau/2 and self.Tau) is intended to be used
-        to refine the results of an approximate nearest neighbors search
-        using a subspace tree.
-        The "neighborhood" of samples that fall in the same tree node
-        will typically be a small number, and so we add only a constant time
-        additional computation to the retrieval time of the tree structure.
-        @param v: The input sample
-        @param K: The number of nearest neighbors to return
-        @return: A list of tuples (d,vn,l) of the nearest neighbors, where d is distance,
-            vn is the neighbor vector, and L is the label of the neighbor.
-        """
-        (Ds,Ms,Ls) = self.getSortedNeighbors(v)
-        if len(Ds) < K:
-            #print "getKNearest WARNING: neighborhood size is < K."
-            K = len(Ds)
+        return zip(Ds,Is)
             
-        return [ (Ds[ix], Ms[ix,:], Ls[ix]) for ix in range(K) ]
+
         
     
 def _print_progress(progress_dict, interval_sec=10):
@@ -824,12 +775,12 @@ def _print_progress(progress_dict, interval_sec=10):
         if done_trees == len(tree_ids): break
         sleep(interval_sec) #TODO replace sleep with waiting on a signal, wake when a builder process signals
 
-def test_proximity_tree_matrix():
+def test_proximity_tree_matrix(N=10000):
     """
     Ensure that we can build a proximity tree from matrix inputs
     """
-    M = scipy.randn(10000,100) #10000 samples, 100 dims each
-    L = range(10000) #label is just the index
+    M = scipy.randn(N,100) #10000 samples, 100 dims each
+    L = range(N) #label is just the index
     ptree = ProximityTreeMatrix()
     print "Building proximity tree"
     ptree.build(M, L)
@@ -860,7 +811,7 @@ class ProximityForest(object):
         self.item_wrapper = item_wrapper
         
         self.manager = Manager() #shared state manager for the items dict and progress indicator
-        self.items_dict = self.manager.dict()
+        self.item_data = self.manager.dict()
         self.progress_dict = self.manager.dict()
         
         self.tree_manager = PT_Manager()  #shared state manager for the individual trees
@@ -872,9 +823,9 @@ class ProximityForest(object):
             pad = int(round(math.log10(N)))+1
             for i in range(N):
                 tmp = self.tree_manager.ProxTree(tree_id="t%s.root"%str(i).zfill(pad), item_wrapper=item_wrapper,
-                                     items_dict=self.items_dict, **self.tree_kwargs)
+                                     item_data=self.item_data, **self.tree_kwargs)
                 #tmp = ProximityTree(tree_id="t%s.root"%str(i).zfill(pad), item_wrapper=item_wrapper,
-                #                     items_dict=self.items_dict, **self.tree_kwargs)
+                #                     item_data=self.item_data, **self.tree_kwargs)
                 self.trees.append(tmp)
         else:
             #construct forest from a set of existing proximity trees
@@ -945,9 +896,9 @@ class ProximityForest(object):
     def clear(self):
         """
         Clears the forest so that it is empty, consisting only of a set of root nodes.
-        This will also clear out the items_dict.
+        This will also clear out the item_data.
         """
-        self.items_dict.clear()
+        self.item_data = None
         for tree in self.trees: tree.clear()
         
     def add(self, T, label, key=None):
@@ -961,8 +912,8 @@ class ProximityForest(object):
         samples that are highly self-similar may yield unbalanced trees. addList() will randomize the
         order that samples are added to the forest, which tends to improve quality.
         """        
-        item_key = len(self.items_dict) if key is None else key
-        self.items_dict[item_key] = self.item_wrapper(item_key, T, label=label)
+        item_key = len(self.item_data) if key is None else key
+        self.item_data[item_key] = self.item_wrapper(item_key, T, label=label)
         
         procList = [ Process(target=t._add, args=(item_key,)) for t in self.trees]
         for proc in procList: proc.start()
@@ -988,10 +939,10 @@ class ProximityForest(object):
         print "Adding samples to the forest's items dictionary..."
         item_keys = keys if keys else range(len(samples))
         for (k,s,lb) in zip(item_keys, samples, labels):
-            self.items_dict[k] = self.item_wrapper(k,s,label=lb)
+            self.item_data[k] = self.item_wrapper(k,s,label=lb)
         
         print "Randomizing order of input data..."
-        key_list = scipy.random.permutation( self.items_dict.keys() ) #shuffle order of keys before adding
+        key_list = scipy.random.permutation( self.item_data.keys() ) #shuffle order of keys before adding
         
         self.progress_dict.clear()
         self.progress_dict['Max'] = len(samples)
@@ -1102,7 +1053,7 @@ class ProximityForestClassifier():
         Internal method that generates the KNN prediction for a single test sample T
         """
         KNNs = self.forest.getKNearest(T, self.K)
-        labels = [ self.forest.items_dict[k].label for (_,k) in KNNs]
+        labels = [ self.forest.item_data[k].label for (_,k) in KNNs]
         C = Counter(labels)
         return C.most_common(1)[0][0] #the class of the first most common label in the KNN
     
