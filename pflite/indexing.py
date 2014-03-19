@@ -561,11 +561,6 @@ class ProximityTree(object):
             return sorted_neighbors
         else:
             return sorted_neighbors[0:K]
-
-
-class PT_Manager(BaseManager):
-    pass
-PT_Manager.register('ProxTree', ProximityTree, exposed=['getID','_add','_addList','getLeafSizes','getKNearest','save','__str__'])
    
 class ProximityTreeMatrix(ProximityTree):
     """
@@ -573,7 +568,7 @@ class ProximityTreeMatrix(ProximityTree):
     which is the common use case, but not the most general.
     """
     def __init__(self, tree_id="root", vector_distance='euclidean', depth=0, parent=None, root=None,
-                   Tau=15, maxdepth=50, **kwargs):
+                   item_data=None, Tau=15, maxdepth=50, **kwargs):
         """
         Constructor
         @param tree_id: A string to identify this tree / subtree
@@ -595,7 +590,7 @@ class ProximityTreeMatrix(ProximityTree):
         all kwargs will be passed onto all child subtrees.
         """
         ProximityTree.__init__(self, tree_id=tree_id, item_wrapper=None, depth=depth, parent=parent, root=root,
-                         item_data=None, Tau=Tau, maxdepth=maxdepth, **kwargs)
+                         item_data=item_data, Tau=Tau, maxdepth=maxdepth, **kwargs)
         self.vector_dist = vector_distance
         #self.item_data will be dict{matrix=M, labels=L} where M is data matrix, L is label vector
         #self.items will be a list of indexes into item_data[matrix] to represent the vectors in this node
@@ -640,17 +635,24 @@ class ProximityTreeMatrix(ProximityTree):
                                        parent=self, root=r, Tau=self.Tau, maxdepth=self.maxdepth, **self.tree_kwargs)
 
         #recursively build the left and right subtrees
-        self.Children[0].items = left_items
-        self.Children[0]._buildIndex()
-        self.Children[1].items = right_items
-        self.Children[1]._buildIndex()
+        self.Children[0]._buildIndex(items=left_items)
+        self.Children[1]._buildIndex(items=right_items)
         
         
-    def _buildIndex(self):
+    def _buildIndex(self, items=None):
         """
         Internal method for building the tree (index) from all the
         data in matrix M.
+        @param items: Optional. If provided, then this node will
+        start with the specified list of items, which are indexes (rows)
+        into the tree's data matrix M. If None, then this node will
+        have all the rows of M as the starting items.
         """
+        if items is None:
+            self.items = range( self._matrix().shape[0] )
+        else:
+            self.items = items
+            
         if self.depth == self.maxdepth:
             raise ValueError("Bad Tree %s, Max Depth (%d) Reached"%(self.ID, self.maxdepth))
         
@@ -663,16 +665,18 @@ class ProximityTreeMatrix(ProximityTree):
             self._split()
         return
         
-    def build(self, M, L):
+    def build(self, M, L, items=None):
         """
         Build the Proximity Tree using input matrix
         and associated label vector.
+        @param M: The data matrix
+        @param L: The label vector
+        
         """
         if type(L) == list:
             L = scipy.array(L)
         self.item_data = {"matrix":M, "labels":L}
-        self.items = range(len(L))  #at this point all indexes are in this node
-        self._buildIndex()
+        self._buildIndex(items=items)
         
     def add(self, T, label=None):
         """
@@ -738,8 +742,14 @@ class ProximityTreeMatrix(ProximityTree):
         return zip(Ds,Is)
             
 
-        
-    
+
+class PT_Manager(BaseManager):
+    pass
+PT_Manager.register('ProxTree', ProximityTree, exposed=['getID','_add','_addList','getLeafSizes','getKNearest','save','__str__'])
+PT_Manager.register('ProxTreeMatrix', ProximityTreeMatrix, 
+                    exposed=['getID','_buildIndex','build','getLeafSizes','getKNearest','save','__str__'])      
+
+
 def _print_progress(progress_dict, interval_sec=10):
     """
     Internal func used to print forest indexing progress
@@ -789,6 +799,8 @@ def test_proximity_tree_matrix(N=10000):
     rc = ptree.getKNearest(v, 3)
     
     return ptree, rc
+
+
 
 class ProximityForest(object):
     '''
@@ -1018,6 +1030,72 @@ class ProximityForest(object):
                 
         return sorted(KNNs)[0:K] #like this, if K=3: [ (d1,k1), (d2,k2), (d3,k3)]  
 
+
+class ProximityForestMatrix(ProximityForest):
+    """
+    A collection of ProximityTreeMatrix objects for ANN indexing.
+    This is the forest object to use when indexing feature vector
+    data.
+    """
+    def __init__(self, N, trees=None, **kwargs):
+        self.tree_kwargs = kwargs
+        self.item_wrapper = 'matrix'
+        #self.manager = Manager()
+        #self.item_data = self.manager.dict()
+        #self.tree_manager = PT_Manager()  #shared state manager for the individual trees
+        #self.tree_manager.start()
+        self.item_data = {}
+        
+        if trees is None:
+            self.N = N
+            self.trees = []
+            pad = int(round(math.log10(N)))+1
+            for i in range(N):
+                #tmp = self.tree_manager.ProxTreeMatrix(tree_id="t%s.root"%str(i).zfill(pad), 
+                #                     item_data=self.item_data, **self.tree_kwargs)
+                tmp = ProximityTreeMatrix(tree_id="t%s.root"%str(i).zfill(pad),
+                                     item_data=self.item_data, **self.tree_kwargs)
+                self.trees.append(tmp)
+        else:
+            #construct forest from a set of existing proximity trees
+            self.N = len(trees)
+            self.trees = trees
+            
+    
+    def add(self, T, label, key=None): raise NotImplemented
+    def addList(self, samples, labels, keys=None, report_frac = 0.01, refresh_progress=10):
+        raise NotImplemented
+    
+    def build(self, M, L):
+        self.item_data['matrix']=M
+        self.item_data['labels']=L
+        print "Adding input data to forest..."
+        for idx,ptree in enumerate(self.trees):
+            print "Building tree %d..."%(idx+1)
+            ptree._buildIndex()
+        #procList = [ Process(target=t._buildIndex) for t in self.trees]
+        #progressProc = Process(target=_print_progress, args=(self.progress_dict,10))
+        #progressProc.start()
+        #for proc in procList: proc.start()  #start them all
+        #for proc in procList: proc.join()   #wait for them all
+        #progressProc.join()
+        print "Forest construction is complete."
+  
+def test_proximity_forest_matrix(N=10000):
+    """
+    Ensure that we can build a proximity forest from matrix inputs
+    """
+    M = scipy.randn(N,100) #10000 samples, 100 dims each
+    L = range(N) #label is just the index
+    f = ProximityForestMatrix(8, Tau=15)
+    print "Building proximity forest"
+    f.build(M, L)
+    
+    v = scipy.randn(1,100)
+    rc = f.getKNearest(v, 3)
+    
+    return f, rc
+      
 class ProximityForestClassifier():
     """
     KNN classification using a ProximityForest index
