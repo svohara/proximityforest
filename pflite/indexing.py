@@ -16,8 +16,12 @@ import math
 from collections import Counter
 from time import sleep
 
-from multiprocessing import Process, Manager, Queue
+import multiprocessing as mp
 from multiprocessing.managers import BaseManager
+
+import ctypes
+from contextlib import closing
+
     
 class ZeroMedianDistanceError(ValueError):
     pass
@@ -125,13 +129,13 @@ class ProximityTree(object):
         self.depth = depth
         self.Tau = Tau
         self.parent = parent
-        self.root = root
+        self.root = root if root else self  #root node points to self
         
         self.item_wrapper = item_wrapper
         if item_data is None:
             #use same item data as root node, if this is a subtree and caller has
             # not provided an explicit override.
-            self.item_data = root.item_data if not (self.root is None) else {}
+            self.item_data = {} if self._isRootNode() else root.item_data
         else:
             self.item_data = item_data
             
@@ -143,7 +147,16 @@ class ProximityTree(object):
         self.maxdepth = maxdepth #to prevent pathological imbalances from tripping a recursion exception and crashing
         self.tree_kwargs = kwargs
         self.Ds = None
-          
+    
+    def _isRootNode(self):
+        return (self.root == self)
+    
+    def _item_data(self):
+        #all subtrees should be referencing only 1 instance
+        # of the item_data structure, which is at the root node.
+        #self.root is self when at the root node.
+        return self.root.item_data
+    
     def __str__(self):
         if self.State == "Collecting":
             s = "%s. State=Collecting. NumItems=%d."%(self.ID, len(self.items))
@@ -163,16 +176,17 @@ class ProximityTree(object):
         the user-supplied key is used, and a check is made to ensure that this
         key has not already been used in the dict.
         @return: The key to the wrapped item, which can be retrieved using
-        the self.item_data[key]. Key is hashable and unique.
+        the self._item_data()[key]. Key is hashable and unique.
         """
+        item_data_ = self._item_data()
         if not key:
-            key = len(self.item_data) #TODO replace with safer mechanism
+            key = len( item_data_ ) #TODO replace with safer mechanism
         
-        if key in self.item_data:
+        if key in item_data_:
             raise DuplicateKey
         
         item = self.item_wrapper(key,x,label=label)
-        self.item_data[key] = item
+        item_data_[key] = item
             
         return key
     
@@ -182,8 +196,9 @@ class ProximityTree(object):
         both of which are referenced by their keys in 
         the item dict
         """
-        T1 = self.item_data[key1]
-        T2 = self.item_data[key2]
+        item_data_ = self._item_data()
+        T1 = item_data_[key1]
+        T2 = item_data_[key2]
         return T1.dist(T2)
         
     def _dist2(self, item, key):
@@ -192,14 +207,13 @@ class ProximityTree(object):
         item, not in the item_dict, and another which
         is in the dict and referenced by key.
         """
-        T = self.item_data[key]
+        T = self._item_data()[key]
         return item.dist(T)
         
     def clear(self):
         """
         clears out all data in tree
         """
-        #TODO: do we want to clear the item_data too? at the root node?
         self.items = []
         self.State = "Collecting"
         self.Children = [None,None]
@@ -338,10 +352,7 @@ class ProximityTree(object):
         return ( len(self.items) >= self.Tau )
             
     def _getRoot(self):
-        if (self.root is None):
-            return self
-        else:
-            return self.root
+        return self.root
         
     def _split(self):
         """
@@ -394,13 +405,14 @@ class ProximityTree(object):
         """
         assert(self.Pivot !=None)
         self.Ds = [ self._dist1(item_key, self.Pivot) for item_key in self.items]
-        
+       
+    #TODO test the following, make sure it works in subclasses too... 
     def _issueZeroMedianWarning(self):
-        if not ProximityTree.zero_median_warning_given:                                 
+        if not self.__class__.zero_median_warning_given:                                 
             print "WARNING: Median distance to the pivot in a splitting node is zero."
             print "You have multiple objects added to the forest that have zero distance to each other."
             print "Leaf node splitting will be deferred until a non-zero median value occurs."
-            ProximityTree.zero_median_warning_given = True
+            self.__class__.zero_median_warning_given = True
                 
     def save(self, d, fn):
         """
@@ -596,10 +608,12 @@ class ProximityTreeMatrix(ProximityTree):
         #self.items will be a list of indexes into item_data[matrix] to represent the vectors in this node
     
     def _matrix(self):
-        return self.item_data['matrix'] if self.item_data else None
+        item_data_ = self._item_data()
+        return item_data_['matrix'] if item_data_ else None
     
     def _labels(self):
-        return self.item_data['labels'] if self.item_data else None
+        item_data_ = self._item_data()
+        return item_data_['labels'] if item_data_ else None
     
     def _split(self):
         """
@@ -675,6 +689,10 @@ class ProximityTreeMatrix(ProximityTree):
         """
         if type(L) == list:
             L = scipy.array(L)
+            
+        #since this method is only ever called on the root node,
+        # self.item_data will exist only at root, all subtrees
+        # will access the data from the reference to the root node.
         self.item_data = {"matrix":M, "labels":L}
         self._buildIndex(items=items)
         
@@ -801,7 +819,8 @@ def test_proximity_tree_matrix(N=10000):
     return ptree, rc
 
 
-
+#TODO: Refactor so that the list of trees starts empty [], but is constructed
+# the first time add/addList is called, similar to how PF_Matrix is done.
 class ProximityForest(object):
     '''
     A collection of proximity trees used for ANN queries. A forest can have any
@@ -822,7 +841,7 @@ class ProximityForest(object):
         self.tree_kwargs = kwargs
         self.item_wrapper = item_wrapper
         
-        self.manager = Manager() #shared state manager for the items dict and progress indicator
+        self.manager = mp.Manager() #shared state manager for the items dict and progress indicator
         self.item_data = self.manager.dict()
         self.progress_dict = self.manager.dict()
         
@@ -927,7 +946,7 @@ class ProximityForest(object):
         item_key = len(self.item_data) if key is None else key
         self.item_data[item_key] = self.item_wrapper(item_key, T, label=label)
         
-        procList = [ Process(target=t._add, args=(item_key,)) for t in self.trees]
+        procList = [ mp.Process(target=t._add, args=(item_key,)) for t in self.trees]
         for proc in procList: proc.start()
         for proc in procList: proc.join()
         
@@ -961,8 +980,8 @@ class ProximityForest(object):
         for t in self.trees: self.progress_dict[t.getID()]=0
         
         print "Adding input data to forest..."
-        procList = [ Process(target=t._addList, args=(key_list,report_frac,self.progress_dict)) for t in self.trees]
-        progressProc = Process(target=_print_progress, args=(self.progress_dict,10))
+        procList = [ mp.Process(target=t._addList, args=(key_list,report_frac,self.progress_dict)) for t in self.trees]
+        progressProc = mp.Process(target=_print_progress, args=(self.progress_dict,10))
         progressProc.start()
         for proc in procList: proc.start()  #start them all
         for proc in procList: proc.join()   #wait for them all
@@ -1004,8 +1023,8 @@ class ProximityForest(object):
         that a give sample is a k-neighbor of the probe.
         '''
         KNN_List = [] #there will be a KNN list for each tree in forest...
-        qList = [ Queue() for _ in self.trees ]
-        procList = [Process(target=self._getKNN, args=(self[idx],T,K,qList[idx])) for idx in range(self.N)]
+        qList = [ mp.Queue() for _ in self.trees ]
+        procList = [mp.Process(target=self._getKNN, args=(self[idx],T,K,qList[idx])) for idx in range(self.N)]
         
         for proc in procList: proc.start()
         for proc in procList: proc.join()
@@ -1030,7 +1049,31 @@ class ProximityForest(object):
                 
         return sorted(KNNs)[0:K] #like this, if K=3: [ (d1,k1), (d2,k2), (d3,k3)]  
 
+shared_data = None
+shared_labels = None
 
+def _poolInit(shared_data_, shared_labels_):
+    global shared_data
+    global shared_labels
+    shared_data = shared_data_
+    shared_labels = shared_labels_
+    
+def _buildTree((tree_id, shape, tree_kwargs)):
+    global shared_data
+    global shared_labels
+    print "DEBUG", tree_id, shared_data
+    (N,_p) = shape
+    Mx = scipy.frombuffer(shared_data.get_obj()).reshape(shape)
+    Lx = scipy.frombuffer(shared_labels.get_obj()).reshape((N,1))
+    
+    item_data = {'matrix':Mx, 'labels':Lx}
+    print "Building tree: %s"%tree_id
+    tree = ProximityTreeMatrix(tree_id="%s.root"%tree_id, item_data=item_data, **tree_kwargs)
+    tree._buildIndex()
+    tree.item_data = None  #trying to prevent copying of matrix when tree sent back as result of map
+    return tree
+    
+    
 class ProximityForestMatrix(ProximityForest):
     """
     A collection of ProximityTreeMatrix objects for ANN indexing.
@@ -1040,56 +1083,89 @@ class ProximityForestMatrix(ProximityForest):
     def __init__(self, N, trees=None, **kwargs):
         self.tree_kwargs = kwargs
         self.item_wrapper = 'matrix'
-        #self.manager = Manager()
-        #self.item_data = self.manager.dict()
-        #self.tree_manager = PT_Manager()  #shared state manager for the individual trees
-        #self.tree_manager.start()
         self.item_data = {}
         
         if trees is None:
             self.N = N
             self.trees = []
-            pad = int(round(math.log10(N)))+1
-            for i in range(N):
-                #tmp = self.tree_manager.ProxTreeMatrix(tree_id="t%s.root"%str(i).zfill(pad), 
-                #                     item_data=self.item_data, **self.tree_kwargs)
-                tmp = ProximityTreeMatrix(tree_id="t%s.root"%str(i).zfill(pad),
-                                     item_data=self.item_data, **self.tree_kwargs)
-                self.trees.append(tmp)
         else:
             #construct forest from a set of existing proximity trees
             self.N = len(trees)
             self.trees = trees
             
     
-    def add(self, T, label, key=None): raise NotImplemented
-    def addList(self, samples, labels, keys=None, report_frac = 0.01, refresh_progress=10):
+    def add(self, T, label, key=None):
+        print "Use the build method for creating the index for your data."
+        print "This version of the proximity forest does not support"
+        print "incremental construction."
         raise NotImplemented
     
-    def build(self, M, L):
-        self.item_data['matrix']=M
-        self.item_data['labels']=L
+    def addList(self, samples, labels, keys=None, report_frac = 0.01, refresh_progress=10):
+        print "Use the build method for creating the index for your data."
+        print "This version of the proximity forest does not support"
+        print "incremental construction."
+        raise NotImplemented
+
+    def build(self, M, L, n_jobs=4):
+        """
+        creates the index from input data matrix and label vector
+        @param M: Data matrix, a numpy nd-array, rows are samples and
+        columns are the features
+        @param L: A label vector of integers, same length as rows of M.
+        """
+        global shared_data
+        global shared_labels
+        pad = int(round(math.log10(self.N)))+1
+        tree_info = [ ("%s"%str(i).zfill(pad), M.shape, self.tree_kwargs)
+                          for i in range(self.N)]
+                    
         print "Adding input data to forest..."
-        for idx,ptree in enumerate(self.trees):
-            print "Building tree %d..."%(idx+1)
-            ptree._buildIndex()
-        #procList = [ Process(target=t._buildIndex) for t in self.trees]
-        #progressProc = Process(target=_print_progress, args=(self.progress_dict,10))
-        #progressProc.start()
-        #for proc in procList: proc.start()  #start them all
-        #for proc in procList: proc.join()   #wait for them all
-        #progressProc.join()
+        if n_jobs == 1:
+            #serial construction
+            self.item_data['matrix'] = M
+            self.item_data['labels'] = L
+            for (tree_id, _, _) in tree_info:
+                print "Building tree: %s"%tree_id
+                t = ProximityTreeMatrix(tree_id=tree_id, item_data=self.item_data, **self.tree_kwargs)
+                t._buildIndex()
+                self.trees.append(t)
+        else:
+            #parallel construction
+            #in order to support parallel index construction of large data matrices,
+            # we have to use a shared memory backed data structure
+            shared_data = mp.Array(ctypes.c_double, M.size)
+            Mx = scipy.frombuffer(shared_data.get_obj()).reshape(M.shape)
+            Mx[:] = M[:]  #copy data from input data matrix into shared memory
+            
+            shared_labels = mp.Array(ctypes.c_int64, len(L))
+            Lx = scipy.frombuffer(shared_labels.get_obj()).reshape((1,len(L)))
+            Lx[:] = L[:]
+                       
+            #the forest holds the non-shared versions.
+            #the shared/global versions are only temporary, used during index
+            # construction in multiproc mode
+            self.item_data['matrix']=M
+            self.item_data['labels']=L
+            
+            #build the individual trees
+            with closing(mp.Pool(processes=n_jobs, initializer=_poolInit, 
+                                 initargs=(shared_data,shared_labels))) as pool:
+                trees_ = pool.map( _buildTree, tree_info )
+
+            for t in trees_: t.item_data = self.item_data
+            self.trees = trees_
+
         print "Forest construction is complete."
   
-def test_proximity_forest_matrix(N=10000):
+def test_proximity_forest_matrix(N=10000, num_trees=8, n_jobs=4):
     """
     Ensure that we can build a proximity forest from matrix inputs
     """
     M = scipy.randn(N,100) #10000 samples, 100 dims each
     L = range(N) #label is just the index
-    f = ProximityForestMatrix(8, Tau=15)
+    f = ProximityForestMatrix(num_trees, Tau=15)
     print "Building proximity forest"
-    f.build(M, L)
+    f.build(M, L, n_jobs=n_jobs)
     
     v = scipy.randn(1,100)
     rc = f.getKNearest(v, 3)
