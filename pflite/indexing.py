@@ -7,6 +7,8 @@ Proximity Forest Indexing
 import scipy
 import scipy.spatial.distance as spd
 
+from tempfile import mkdtemp
+
 import sys
 import os
 import cPickle
@@ -652,6 +654,8 @@ class ProximityTreeMatrix(ProximityTree):
         self.Children[0]._buildIndex(items=left_items)
         self.Children[1]._buildIndex(items=right_items)
         
+        #remove items from this node, as they've all been sent down
+        self.items = []
         
     def _buildIndex(self, items=None):
         """
@@ -886,7 +890,9 @@ class ProximityForest(object):
         The following files will be created
         1) tree_<num>.p, one pickle file for each tree in the forest,
         and <num> will be a zero-padded number, like 001, 002, ..., 999.
-        2) forest_info.p, a single file with information about the forest     
+        2) forest_info.p, a single file with information about the forest    
+        3) item_data.p, a single file containing the item data that the
+        forest indexes, to prevent redundant storage in each tree. 
         @param base_dir: The base directory which holds saved forests
         @param forest_name: The files for the forest will be stored in this
         subdirectory of the base_dir
@@ -899,12 +905,18 @@ class ProximityForest(object):
         d = os.path.join(base_dir,forest_name)
         if not os.path.exists(d): os.makedirs(d, 0777)
         
+        
+        id_file = os.path.join(d,"item_data.p")
+        print "Saving item data to %s"%id_file
+        cPickle.dump( self.item_data, open(id_file,"wb"), protocol=-1)
+        
         for i,tree in enumerate(self.trees):
             if not forest_idx is None:
                 tidx = i + (forest_idx*len(self))
             else:
                 tidx = i
             tn = "tree_%s.p"%str(tidx).zfill(3)
+            tree.item_data = None
             tree.save(d, tn)
             
         finfo = {}
@@ -1049,28 +1061,21 @@ class ProximityForest(object):
                 
         return sorted(KNNs)[0:K] #like this, if K=3: [ (d1,k1), (d2,k2), (d3,k3)]  
 
-shared_data = None
-shared_labels = None
-
-def _poolInit(shared_data_, shared_labels_):
-    global shared_data
-    global shared_labels
-    shared_data = shared_data_
-    shared_labels = shared_labels_
+def _buildTree(X):
+    (tree_id, mmap_info, tree_kwargs) = X
+    (fn_data, shp, dt, fn_labels, shp2, dt2) = mmap_info
+    fp = scipy.memmap(fn_data, shape=shp, dtype=dt, mode='r') #read only
+    fp2 = scipy.memmap(fn_labels, shape=shp2, dtype=dt2, mode='r')
     
-def _buildTree((tree_id, shape, tree_kwargs)):
-    global shared_data
-    global shared_labels
-    print "DEBUG", tree_id, shared_data
-    (N,_p) = shape
-    Mx = scipy.frombuffer(shared_data.get_obj()).reshape(shape)
-    Lx = scipy.frombuffer(shared_labels.get_obj()).reshape((N,1))
-    
-    item_data = {'matrix':Mx, 'labels':Lx}
+    item_data = {'matrix':fp, 'labels':fp2}
     print "Building tree: %s"%tree_id
     tree = ProximityTreeMatrix(tree_id="%s.root"%tree_id, item_data=item_data, **tree_kwargs)
     tree._buildIndex()
-    tree.item_data = None  #trying to prevent copying of matrix when tree sent back as result of map
+    tree.item_data = None  #trying to prevent copying of matrix when tree sent back to parent proc
+    
+    del fp
+    del fp2
+    
     return tree
     
     
@@ -1113,34 +1118,61 @@ class ProximityForestMatrix(ProximityForest):
         columns are the features
         @param L: A label vector of integers, same length as rows of M.
         """
-        global shared_data
-        global shared_labels
-        pad = int(round(math.log10(self.N)))+1
-        tree_info = [ ("%s"%str(i).zfill(pad), M.shape, self.tree_kwargs)
-                          for i in range(self.N)]
+        if type(L) == list:
+            L = scipy.array(L)
                     
         print "Adding input data to forest..."
         if n_jobs == 1:
             #serial construction
             self.item_data['matrix'] = M
             self.item_data['labels'] = L
-            for (tree_id, _, _) in tree_info:
+            
+            #generate tree names and other info to be passed to the processes
+            # that build the individual trees
+            pad = int(round(math.log10(self.N)))+1
+            tree_names = [ "%s"%str(i).zfill(pad) for i in range(self.N)]
+        
+            for tree_id in tree_names:
                 print "Building tree: %s"%tree_id
                 t = ProximityTreeMatrix(tree_id=tree_id, item_data=self.item_data, **self.tree_kwargs)
                 t._buildIndex()
                 self.trees.append(t)
         else:
-            #parallel construction
-            #in order to support parallel index construction of large data matrices,
-            # we have to use a shared memory backed data structure
-            shared_data = mp.Array(ctypes.c_double, M.size)
-            Mx = scipy.frombuffer(shared_data.get_obj()).reshape(M.shape)
-            Mx[:] = M[:]  #copy data from input data matrix into shared memory
+            #for parallel/multiproc building, we're going to put the
+            # data matrix into a numpy memmap structure, so that each
+            # process can get a read-only view onto a common structure,
+            # which is backed by disc for scalability.
+            print "Building memmap storage for data"
+            tmpdir = mkdtemp()
             
-            shared_labels = mp.Array(ctypes.c_int64, len(L))
-            Lx = scipy.frombuffer(shared_labels.get_obj()).reshape((1,len(L)))
-            Lx[:] = L[:]
-                       
+            dt = M.dtype  #data type
+            shp = M.shape #matrix shape
+            fn_data = os.path.join( tmpdir, 'pf_matrix.dat')
+            fp = scipy.memmap(fn_data, dtype=dt, mode="w+", shape=shp)
+            fp[:] = M[:]
+    
+            dt2 = L.dtype
+            shp2 = L.shape
+            fn_labels = os.path.join( tmpdir, 'pf_labels.dat')
+            fp2 = scipy.memmap(fn_labels, dtype=dt2, mode="w+", shape=shp2)
+            fp2[:] = L[:]
+            
+            #once data has been written to temp dat files,
+            # we can delete the file pointers. The subprocs used
+            # to build the forest will open read-only memmaps to
+            # these files.
+            del fp
+            del fp2
+            
+            #info to pass to subprocesses
+            mmap_info = (fn_data, shp, dt, fn_labels, shp2, dt2)
+            
+            #generate tree names and other info to be passed to the processes
+            # that build the individual trees
+            pad = int(round(math.log10(self.N)))+1
+            tree_info = [ ("%s"%str(i).zfill(pad), mmap_info, self.tree_kwargs)
+                              for i in range(self.N)]
+        
             #the forest holds the non-shared versions.
             #the shared/global versions are only temporary, used during index
             # construction in multiproc mode
@@ -1148,10 +1180,16 @@ class ProximityForestMatrix(ProximityForest):
             self.item_data['labels']=L
             
             #build the individual trees
-            with closing(mp.Pool(processes=n_jobs, initializer=_poolInit, 
-                                 initargs=(shared_data,shared_labels))) as pool:
+            with closing(mp.Pool(processes=n_jobs)) as pool:
                 trees_ = pool.map( _buildTree, tree_info )
 
+            #delete temp files
+            print "Removing mem-mapped temporary files"
+            os.unlink(fn_data)
+            os.unlink(fn_labels)
+            os.rmdir(tmpdir)
+
+            print "Linking item data to trees"
             for t in trees_: t.item_data = self.item_data
             self.trees = trees_
 

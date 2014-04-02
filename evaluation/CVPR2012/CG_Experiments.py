@@ -138,7 +138,7 @@ def testTauValues(GDat, TauVals = (10,15,20,25), treeClass=pf.TensorSubspaceTree
         print "=================================="
         print "Starting %d Trials with Tau=%d, K=%d"%(NumTrials, Tau, K)
         print "=================================="
-        errs = scipy.ones( (NumTrials,5))        
+        errs = scipy.ones( (NumTrials,4))        
         for trial in range(NumTrials):
             print "Starting Trial %d"%(trial+1)
             (_, errList, _) = cambridgeStandardClassification(GDat, treeClass=treeClass, N=N, Tau=Tau,
