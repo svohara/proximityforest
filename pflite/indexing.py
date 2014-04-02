@@ -883,6 +883,20 @@ class ProximityForest(object):
         #assert i in range(self.N)
         return self.trees[i] 
     
+    def _linkdata(self, item_data):
+        '''
+        Internal method that links each tree in the forest
+        as well as the forest itself to the provided item_data
+        object. This would usually be done when loading a saved
+        index from disk. The forest would be reconstituted
+        from the saved trees and then the item data loaded and
+        linked to the index.
+        '''
+        self.item_data = item_data
+        for t in self.trees:
+            t.item_data = item_data
+        
+        
     def save(self, base_dir, forest_name, forest_idx=None):
         '''
         Saves the forest as a set of files in the forest_name
@@ -1117,6 +1131,10 @@ class ProximityForestMatrix(ProximityForest):
         @param M: Data matrix, a numpy nd-array, rows are samples and
         columns are the features
         @param L: A label vector of integers, same length as rows of M.
+        @param n_jobs: The number of processes used to build the forest.
+        More processes can speed up the build time, but at a cost of
+        additional memory usage (temporarily, while the build is in
+        progress). Specify 1 for a serial construction.
         """
         if type(L) == list:
             L = scipy.array(L)
@@ -1210,6 +1228,7 @@ def test_proximity_forest_matrix(N=10000, num_trees=8, n_jobs=4):
     
     return f, rc
       
+#TODO: adapt for matrix usage, or subclass
 class ProximityForestClassifier():
     """
     KNN classification using a ProximityForest index
