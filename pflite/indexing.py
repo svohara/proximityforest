@@ -576,6 +576,7 @@ class ProximityTree(object):
         else:
             return sorted_neighbors[0:K]
    
+
 class ProximityTreeMatrix(ProximityTree):
     """
     Version of the proximity tree for use when input is a matrix,
@@ -633,7 +634,13 @@ class ProximityTreeMatrix(ProximityTree):
         M = item_data[self.items, :]
         
         self.Ds = spd.cdist(M, pivot_vector, self.vector_dist).squeeze()
-        self.SplitD  = scipy.median(self.Ds) #splitting distance is the median dist to pivot vector
+        
+        #don't use exact median, as below. Instead, construct a median
+        # from a small random sample, Tau values, to increase diversity
+        # in the proximity trees of a forest.
+        #self.SplitD  = scipy.median(self.Ds) #splitting distance is the median dist to pivot vector
+        sample_dists = scipy.random.permutation(self.Ds)[0:self.Tau]
+        self.SplitD = scipy.median(sample_dists) #median of sample points distance to pivot
         
         #subset of all samples <= median dist from pivot
         maskL = scipy.nonzero(self.Ds <= self.SplitD)[0]
@@ -1092,7 +1099,10 @@ def _buildTree(X):
     
     return tree
     
-    
+#TODO: Why does this implementation seem to be less accurate than
+# the slower ProximityForest_Matrix in the main/original library?
+# Less randomness in some way? How would batch construction in the
+# trees lead to worse indexing than the online building process? 
 class ProximityForestMatrix(ProximityForest):
     """
     A collection of ProximityTreeMatrix objects for ANN indexing.
