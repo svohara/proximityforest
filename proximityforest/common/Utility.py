@@ -23,7 +23,7 @@ with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import scipy as sp
 import pyvision as pv
-import Image as PIL
+import PIL.Image as PIL
 import math
 from scipy.stats.distributions import entropy
 #TODO: Check col/row mapping to x/y when using pv.Image().asMatrix2D()...pyvision
